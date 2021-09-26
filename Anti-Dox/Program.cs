@@ -1,0 +1,206 @@
+﻿using Discord;
+using Discord.Commands;
+using Discord.WebSocket;
+using Anti_Dox.Database;
+using Anti_Dox.Services;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Serilog;
+using System;
+using System.Linq;
+using System.Threading.Tasks;
+using Discord.API;
+using Anti_Dox.dependencies;
+using Serilog.Sinks.SystemConsole.Themes;
+using Serilog.Sinks.SystemConsole;
+using Anti_Dox.Modules;
+using Anti_Dox.Interactions.SlashCreator;
+using Anti_Dox.Interactions.SlashHandler;
+using Anti_Dox.Interactions;
+using Microsoft.EntityFrameworkCore;
+using System.Text;
+
+namespace Anti_Dox
+
+
+{
+    internal class Program
+    {
+        // setup our fields we assign later
+        private readonly IConfiguration _config;
+        private DiscordShardedClient _client;
+        private static string _logLevel;
+
+        private static void Main(string[] args = null)
+        {
+            if (args.Count() != 0)
+            {
+                _logLevel = args[0];
+            }
+            var _status = new Status
+            {
+                StatusMessage = "Looking at +help"
+            };
+            
+            using (var db = new AntiDoxDb())
+            {
+                 db.Database.EnsureCreated();
+                var status = db.Status.FirstOrDefault();
+                if(status == null)
+                {
+                    db.Status.Add(_status);
+                    db.SaveChanges();
+                } 
+            }
+
+
+            Log.Logger = new LoggerConfiguration()
+                .WriteTo.File("logs/Anti-Dox.log", rollingInterval: RollingInterval.Day)
+                .WriteTo.Console(theme: Serilogtheme.DiscordMatrix)
+                .CreateLogger();
+
+            Console.Clear();
+            Console.Title = "Anti-Dox";
+            new Program().MainAsync().GetAwaiter().GetResult();
+        }
+
+        public Program()
+        {
+
+            // create the configuration
+            var _builder = new ConfigurationBuilder()
+                .SetBasePath(AppContext.BaseDirectory)
+                .AddJsonFile(path: "config.json");
+
+            // build the configuration and assign to _config
+            _config = _builder.Build();
+        }
+
+        public async Task MainAsync()
+        {
+            //clear console
+            Console.Clear();
+            // call ConfigureServices to create the ServiceCollection/Provider for passing around the services
+            using (var services = ConfigureServices())
+            {
+                // get the client and assign to client
+                // you get the services via GetRequiredService<T>
+                _client = services.GetRequiredService<DiscordShardedClient>();
+
+                // setup logging and the ready event
+                services.GetRequiredService<LoggingService>();
+
+                //adding other services
+                services.GetRequiredService<HelpSlashCreator>();
+                services.GetRequiredService<HelpSlashHandler>();
+                services.GetRequiredService<LoggingService>();
+
+                // this is where we get the Token value from the configuration file, and start the bot
+                await _client.LoginAsync(TokenType.Bot, _config["Token"]);
+                await _client.StartAsync();
+
+                // we get the CommandHandler class here and call the InitializeAsync method to start things up for the CommandHandler service
+                await services.GetRequiredService<CommandHandler>().InitializeAsync();
+
+
+                await Task.Delay(-1);
+            }
+        }
+
+        private Task LogAsync(LogMessage log)
+        {
+            Console.WriteLine(log.ToString());
+            return Task.CompletedTask;
+        }
+
+        private Task ReadyAsync()
+        {
+            
+            return Task.CompletedTask;
+        }
+
+        // this method handles the ServiceCollection creation/configuration, and builds out the service provider we can call on later
+        private ServiceProvider ConfigureServices()
+        {
+            // this returns a ServiceProvider that is used later to call for those services
+            // we can add types we have access to here, hence adding the new using statement:
+            // using .Services;
+            // the Config we build is also added, which comes in handy for setting the command prefix!
+
+            var services = new ServiceCollection()
+                .AddSingleton(_config)
+                .AddSingleton(new DiscordShardedClient(new DiscordSocketConfig
+                {
+                    GatewayIntents =
+                        GatewayIntents.GuildMembers |
+                        GatewayIntents.GuildMessages |
+                        GatewayIntents.GuildIntegrations |
+                        GatewayIntents.Guilds |
+                        GatewayIntents.GuildBans |
+                        GatewayIntents.GuildEmojis |
+                        GatewayIntents.GuildInvites |
+                        GatewayIntents.GuildMessageReactions |
+                        GatewayIntents.GuildMessageTyping |
+                        GatewayIntents.GuildWebhooks |
+                        GatewayIntents.DirectMessageReactions |
+                        GatewayIntents.DirectMessages |
+                        GatewayIntents.DirectMessageTyping,
+                    AlwaysDownloadUsers = true,
+                    LogLevel = LogSeverity.Error,
+                    MessageCacheSize = 1000,
+
+                }))
+                .AddSingleton(new CommandService(new CommandServiceConfig
+                {
+                    DefaultRunMode = RunMode.Async,
+                    CaseSensitiveCommands = false,
+                    ThrowOnError = false,
+
+                }))
+                .AddSingleton<CommandHandler>()
+                .AddSingleton<LoggingService>()
+                .AddSingleton<HelpSlashCreator>()
+                .AddSingleton<HelpSlashHandler>()
+                .AddSingleton<LoggingService>()
+                .AddDbContext<AntiDoxDb>()
+
+                .AddLogging(configure => configure.AddSerilog());
+
+            if (!string.IsNullOrEmpty(_logLevel))
+            {
+                switch (_logLevel.ToLower())
+                {
+                    case "info":
+                        {
+                            services.Configure<LoggerFilterOptions>(options => options.MinLevel = LogLevel.Information);
+                            break;
+                        }
+                    case "error":
+                        {
+                            services.Configure<LoggerFilterOptions>(options => options.MinLevel = LogLevel.Error);
+                            break;
+                        }
+                    case "debug":
+                        {
+                            services.Configure<LoggerFilterOptions>(options => options.MinLevel = LogLevel.Debug);
+                            break;
+                        }
+                    default:
+                        {
+                            services.Configure<LoggerFilterOptions>(options => options.MinLevel = LogLevel.Error);
+                            break;
+                        }
+                }
+            }
+            else
+            {
+                services.Configure<LoggerFilterOptions>(options => options.MinLevel = LogLevel.Information);
+            }
+
+            var serviceProvider = services.BuildServiceProvider();
+
+            return serviceProvider;
+        }
+    }
+}
